@@ -1,0 +1,16 @@
+# Rhapso mask fusion parameters. The output is fused onto the CCF-channel grid
+# (fused_ccf_ch) so registration can multiply the mask into the sample.
+
+# AFFINE FUSION
+block_size: [256, 256, 384]           # xyz, per-task output block
+intensity_range: [0, 65535]           # uint16 output range
+block_scale: [2, 2, 1]                # xyz, task batching (blocks per Ray task)
+overlap_strategy: "lowest_view_wins"  # crisp binary mask (no fractional blended edges)
+output_zarr_version: 2                # registration reads Zarr v2
+
+# MULTISCALE  (level 3 = 8x downsample = the level registration reads)
+multiscale_chunk_size: [128, 128, 128]
+n_lvls: 8
+scale_factor: [[2, 2, 2], [2, 2, 2], [2, 2, 2], [2, 2, 2], [2, 2, 2], [2, 2, 2], [2, 2, 2]]  # zyx
+target_block_size_mb: 256
+base_level: 0
