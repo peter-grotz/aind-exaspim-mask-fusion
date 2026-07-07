@@ -29,11 +29,15 @@ output is removed and the run exits 0, so registration simply proceeds unmasked.
 - `code/emit_mask_fusion_record.py`, `code/aind_process_record.py` — process metadata.
 - `code/config/fusion_params.yml` — Rhapso params (`output_zarr_version: 2`, level-3 = 8×).
 
-## Environment (Code Ocean GUI — no custom Dockerfile)
-Set the environment through the CO Environment Editor so it stays GUI-editable (a hand-written
-Dockerfile disables the editor). S3 I/O uses boto3, so no AWS CLI / apt is needed:
-- **Base image:** a **Python 3.11** base (Rhapso 0.3.9 requires ≥3.11).
-- **pip:** `Rhapso==0.3.9` (pulls its own ray 2.9.1, zarr>=3, s3fs, scipy, dask), `boto3`, `PyYAML`.
+## Environment (custom Dockerfile — editor disabled, as with the other capsules)
+Rhapso 0.3.9 needs **exactly Python 3.11**: it requires ≥3.11, and its pinned `ray==2.9.1` has no
+3.12 wheel. Code Ocean's GUI base images don't offer 3.11, so a custom `environment/Dockerfile` is
+required (the GUI editor stays disabled). It:
+- bases on the 3.10 image + `mamba install python=3.11`,
+- `pip install Rhapso==0.3.9 boto3 PyYAML` (Rhapso pulls ray 2.9.1, zarr>=3, s3fs, scipy, dask),
+- declares `ARG AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY/AWS_DEFAULT_REGION` so CO can attach the AWS
+  role to this custom-Dockerfile capsule (without these lines CO blocks credential attachment).
+S3 I/O uses boto3 — no AWS CLI.
 
 ## Compute / resources (LOCAL Ray — runs on this instance)
 Unlike the BigStitcher path (which offloaded to EMR-Serverless), this capsule fuses **on the
