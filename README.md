@@ -16,7 +16,7 @@ output is removed and the run exits 0, so registration simply proceeds unmasked.
    - `MultiScale(...)` for the pyramid (level 3 = 8× is what registration reads).
    No XML editing is needed: Rhapso reads tiles from `zarr_input_prefix` + the XML's relative
    tile paths, so pointing the prefix at the mask tiles reuses the CCF transforms directly.
-3. Emits `mask_fusion_data_process.json` to `/results/fusion` for the upload capsule.
+3. Emits `mask_fusion_data_process.json` to `/results/mask_fusion` for the upload capsule.
 
 ## Verified before build
 - **Grid parity:** Rhapso's `ComputeBBox` on the CCF XML gives `(X,Y,Z)=[8244,4974,2378]`,
@@ -28,7 +28,12 @@ output is removed and the run exits 0, so registration simply proceeds unmasked.
 - `code/fuse_mask.py` — driver (manifest → local Rhapso fusion → graceful cleanup → metadata).
 - `code/emit_mask_fusion_record.py`, `code/aind_process_record.py` — process metadata.
 - `code/config/fusion_params.yml` — Rhapso params (`output_zarr_version: 2`, level-3 = 8×).
-- `environment/Dockerfile` — mambaforge py3.10 + `Rhapso==0.3.9` (pulls ray 2.9.1, zarr>=3, s3fs).
+
+## Environment (Code Ocean GUI — no custom Dockerfile)
+Set the environment through the CO Environment Editor so it stays GUI-editable (a hand-written
+Dockerfile disables the editor). S3 I/O uses boto3, so no AWS CLI / apt is needed:
+- **Base image:** a **Python 3.11** base (Rhapso 0.3.9 requires ≥3.11).
+- **pip:** `Rhapso==0.3.9` (pulls its own ray 2.9.1, zarr>=3, s3fs, scipy, dask), `boto3`, `PyYAML`.
 
 ## Compute / resources (LOCAL Ray — runs on this instance)
 Unlike the BigStitcher path (which offloaded to EMR-Serverless), this capsule fuses **on the

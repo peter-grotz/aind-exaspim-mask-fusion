@@ -12,13 +12,15 @@ channel's transforms -- no XML editing needed.
 
 Best-effort leaf: ANY failure (including a missing manifest) removes the partial
 output and exits 0 so the pipeline continues (registration runs unmasked).
+
+S3 I/O uses boto3 (already a Rhapso dependency) -- no AWS CLI needed, which keeps
+the environment expressible through the Code Ocean GUI editor.
 """
 from __future__ import annotations
 
 import glob
 import json
 import os
-import subprocess
 import sys
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
@@ -37,6 +39,11 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _split_s3(uri: str) -> tuple[str, str]:
+    u = urlparse(uri)
+    return u.netloc, u.path.lstrip("/")
+
+
 def read_manifest_input_uri() -> str:
     paths = [p for p in glob.glob("../data/*.json") if "manifest" in os.path.basename(p).lower()]
     if len(paths) != 1:
@@ -46,8 +53,8 @@ def read_manifest_input_uri() -> str:
 
 
 def s3_read(uri: str) -> bytes:
-    u = urlparse(uri)
-    return boto3.client("s3").get_object(Bucket=u.netloc, Key=u.path.lstrip("/"))["Body"].read()
+    bucket, key = _split_s3(uri)
+    return boto3.client("s3").get_object(Bucket=bucket, Key=key)["Body"].read()
 
 
 def voxel_size_zyx(xml_bytes: bytes) -> list[float]:
@@ -60,17 +67,32 @@ def voxel_size_zyx(xml_bytes: bytes) -> list[float]:
 
 
 def verify_level3(mask_out: str) -> None:
-    """Confirm the level registration reads (3) exists and holds chunk data, so an
-    empty fusion is caught at the source rather than silently ignored downstream.
-    (A degenerate-but-present mask is still caught by registration's foreground gate.)"""
-    lvl3 = f"{mask_out.rstrip('/')}/3/"
-    res = subprocess.run(["aws", "s3", "ls", "--recursive", lvl3], capture_output=True, text=True)
-    keys = [line.split()[-1] for line in res.stdout.splitlines() if line.strip()]
-    chunks = [k for k in keys
-              if not os.path.basename(k).startswith(".") and not k.endswith("zarr.json")]
-    if not chunks:
-        raise RuntimeError(f"fused mask level-3 has no chunk data at {lvl3} "
-                           f"({len(keys)} objects, 0 chunks) -- fusion produced an empty mask")
+    """Confirm the level registration reads (3) holds chunk data, so an empty fusion
+    is caught at the source rather than silently ignored downstream. (A degenerate-
+    but-present mask is still caught by registration's foreground gate.)"""
+    bucket, prefix = _split_s3(f"{mask_out.rstrip('/')}/3/")
+    s3 = boto3.client("s3")
+    for page in s3.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            name = obj["Key"].rsplit("/", 1)[-1]
+            if not name.startswith(".") and name != "zarr.json":
+                return  # a real chunk exists
+    raise RuntimeError(f"fused mask level-3 has no chunk data under s3://{bucket}/{prefix} "
+                       f"-- the fusion produced an empty mask")
+
+
+def s3_rm_recursive(uri: str) -> None:
+    bucket, prefix = _split_s3(f"{uri.rstrip('/')}/")
+    s3 = boto3.client("s3")
+    batch: list[dict] = []
+    for page in s3.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            batch.append({"Key": obj["Key"]})
+            if len(batch) == 1000:
+                s3.delete_objects(Bucket=bucket, Delete={"Objects": batch})
+                batch = []
+    if batch:
+        s3.delete_objects(Bucket=bucket, Delete={"Objects": batch})
 
 
 def emit_record(start: str, status: str) -> None:
@@ -147,7 +169,10 @@ def main() -> int:
         print(f"WARNING: mask fusion failed ({type(e).__name__}: {e}); removing partial "
               f"output and continuing unmasked.", file=sys.stderr)
         if mask_out:
-            subprocess.run(["aws", "s3", "rm", "--recursive", f"{mask_out.rstrip('/')}/"], check=False)
+            try:
+                s3_rm_recursive(mask_out)
+            except Exception as ce:
+                print(f"  (partial-output cleanup failed: {ce})", file=sys.stderr)
 
     emit_record(start, status)
     print(f"mask fusion status: {status}")
