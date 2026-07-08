@@ -39,8 +39,7 @@ def emit(start=None, status="SUCCESS"):
         name="Brain mask fusion",
         start=start,
         end=end,
-        # TODO: set to this capsule's Code Ocean URL once the capsule is created.
-        code_url="https://codeocean.allenneuraldynamics.org/capsule/PLACEHOLDER/tree",
+        code_url="https://codeocean.allenneuraldynamics.org/capsule/1213439/tree",
         code_name="aind-exaspim-mask-fusion",
         code_version=os.environ.get("CODE_VERSION", "0.0.0"),
         run_script="/code/run",
