@@ -135,18 +135,11 @@ def main() -> int:
         from Rhapso.pipelines.ray.multiscale import MultiScale
         import ray
 
-        # Cap Ray concurrency: peak RAM scales with the number of parallel workers
-        # times the per-task read. The v3 mask tiles are sharded (512^3 shards), so a
-        # single fuse task materializes whole shards -- far more RAM than the small
-        # output block implies. Rhapso calls a bare ray.init(), so default its num_cpus
-        # here -- fewer, fatter workers (2 on a 128 GB box = ~64 GB each) keep the
-        # concurrent heavy shard reads under the node's memory ceiling.
-        max_workers = int(os.environ.get("RAY_MAX_WORKERS", "2"))
-        _orig_ray_init = ray.init
-        ray.init = lambda *a, **k: _orig_ray_init(
-            *a, **{"num_cpus": max_workers, "ignore_reinit_error": True, **k})
-        print(f"Ray worker cap: {max_workers} (override with RAY_MAX_WORKERS)")
-
+        # Rhapso manages its own local Ray runtime (bare ray.init() -> all cores).
+        # Size the instance for RAM: each parallel fuse worker holds a per-task read
+        # (the v3 mask tiles are sharded at 512^3, so a read materializes whole shards),
+        # so peak RAM ~= n_cores * per-task read. Run on a high-memory instance, NOT a
+        # small one -- an undersized box (e.g. 8 GB) OOMs regardless of block size.
         AffineFusion(
             aligned_xml_path=ccf_xml,          # transforms + tile sizes (same as CCF)
             zarr_input_prefix=mask_prefix,     # read the v3 mask tiles instead of the signal
