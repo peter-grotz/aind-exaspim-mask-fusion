@@ -96,8 +96,7 @@ def s3_rm_recursive(uri: str) -> None:
 
 
 def emit_record(start: str, status: str) -> None:
-    """Emit the process record in-process. A failure here is logged loudly, never
-    swallowed -- a silently dropped record is how fusion/soma metadata went missing."""
+    """Emit the process record in-process."""
     try:
         import emit_mask_fusion_record
         emit_mask_fusion_record.emit(start, status)
