@@ -4,7 +4,9 @@
 # AFFINE FUSION
 block_size: [256, 256, 384]           # xyz, per-task output block
 intensity_range: [0, 65535]           # uint16 output range
-block_scale: [2, 2, 1]                # xyz, task batching (blocks per Ray task)
+block_scale: [1, 1, 1]                # xyz, blocks per Ray task -- [1,1,1] = one 256x256x384
+                                      # block per worker (~4x less peak RAM than [2,2,1]);
+                                      # raise only if the instance has ample RAM/vCPU.
 overlap_strategy: "lowest_view_wins"  # crisp binary mask (no fractional blended edges)
 output_zarr_version: 2                # registration reads Zarr v2
 
