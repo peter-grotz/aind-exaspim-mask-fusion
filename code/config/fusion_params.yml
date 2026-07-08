@@ -2,9 +2,13 @@
 # (fused_ccf_ch) so registration can multiply the mask into the sample.
 
 # AFFINE FUSION
-block_size: [128, 128, 256]           # xyz, per-task output block (all 128-multiples; kept
-                                      # small to bound per-task RAM -- the v3 mask tiles are
-                                      # sharded (512^3), so each read materializes whole shards)
+block_size: [256, 256, 256]           # xyz, per-task output block. MUST stay >= the level-0
+                                      # output chunk [z128,y256,x256] and chunk-aligned: with
+                                      # a smaller block (e.g. 128 in x/y) several tasks
+                                      # read-modify-write the SAME S3 chunk concurrently, and
+                                      # last-writer-wins silently clobbers the others -> zero
+                                      # blocks (holes) with no task error. 256 => one block per
+                                      # chunk in x/y, exactly two whole z-chunks -> no sharing.
 intensity_range: [0, 65535]           # uint16 output range
 block_scale: [1, 1, 1]                # xyz, blocks per Ray task -- [1,1,1] = one block/task
                                       # (raise only with ample RAM/vCPU headroom per worker)
