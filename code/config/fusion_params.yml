@@ -2,7 +2,7 @@
 # (fused_ccf_ch) so registration can multiply the mask into the sample.
 
 # AFFINE FUSION
-block_size: [256, 256, 384]           # xyz, per-task output block
+block_size: [128, 128, 384]           # xyz, per-task output block
 intensity_range: [0, 65535]           # uint16 output range
 block_scale: [1, 1, 1]                # xyz, blocks per Ray task -- [1,1,1] = one 256x256x384
                                       # block per worker (~4x less peak RAM than [2,2,1]);
