@@ -130,6 +130,14 @@ def main() -> int:
 
         vsz = voxel_size_zyx(s3_read(ccf_xml))
 
+        # Start from a clean output. Rhapso >=0.3.9 opens the output group in append
+        # mode and (as of 0.4.1) refuses to append when an existing store's Zarr
+        # format differs from output_zarr_version -- so a stale v3 partial from an
+        # earlier run would abort a v2 run. Removing it first also avoids resuming
+        # onto a half-written pyramid. The mask is regenerated in full every run.
+        print(f"clearing any existing output at {mask_out}")
+        s3_rm_recursive(mask_out)
+
         # Imported here so an import error is caught by the graceful-degradation path.
         from Rhapso.pipelines.ray.affine_fusion import AffineFusion
         from Rhapso.pipelines.ray.multiscale import MultiScale

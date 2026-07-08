@@ -26,7 +26,7 @@ def emit(start=None, status="SUCCESS"):
 
     parameters = {
         "engine": "Rhapso",
-        "rhapso_version": os.environ.get("RHAPSO_VERSION", "0.3.9"),
+        "rhapso_version": os.environ.get("RHAPSO_VERSION", "0.4.1"),
         "input_xml": "tile_alignment/ch_ccf_xmls/bigstitcher_split_affine_ch_ccf.xml",
         "input_tiles": "flatfield_correction/mask/SPIM.ome.zarr",
         "output_zarr_version": 2,
