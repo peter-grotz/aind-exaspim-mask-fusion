@@ -2,16 +2,18 @@ FROM registry.codeocean.allenneuraldynamics.org/codeocean/mambaforge3:23.1.0-4-p
 
 ARG DEBIAN_FRONTEND=noninteractive
 
-# AWS credential build ARGs. Code Ocean requires these to be present in a custom
-# Dockerfile before it will attach the AWS role/secret (it can only auto-insert
-# them into a GUI-managed Dockerfile). Matches the other exaSPIM capsules.
+# AWS credential build ARGs. Code Ocean requires these in a custom Dockerfile
+# before it will attach the AWS role/secret. Matches the other exaSPIM capsules.
 ARG AWS_ACCESS_KEY_ID
 ARG AWS_DEFAULT_REGION
 ARG AWS_SECRET_ACCESS_KEY
 
-# Rhapso 0.3.9 needs EXACTLY Python 3.11: it requires >=3.11, and its pinned
-# ray 2.9.1 has no 3.12 wheel. The base image ships 3.10, so upgrade in place.
-RUN mamba install -y "python=3.11" && mamba clean -ya
+# Rhapso 0.3.9 needs EXACTLY Python 3.11 (requires >=3.11; its pinned ray 2.9.1 has
+# no 3.12 wheel). Create a dedicated 3.11 env with the base conda -- do NOT upgrade
+# python in the base env in place, which breaks the base conda/mamba tooling. Put the
+# env first on PATH so `python`/`pip` resolve to it at build and run time.
+RUN conda create -y -n rhapso python=3.11 && conda clean -ya
+ENV PATH=/opt/conda/envs/rhapso/bin:$PATH
 
 # Rhapso 0.3.9 pins its own ray (2.9.1), zarr (>=3), s3fs, scipy, and dask.
 # Do NOT pin a different ray/zarr alongside it. S3 I/O uses boto3 (no AWS CLI).
