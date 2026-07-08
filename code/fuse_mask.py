@@ -135,6 +135,16 @@ def main() -> int:
         from Rhapso.pipelines.ray.multiscale import MultiScale
         import ray
 
+        # Cap Ray concurrency: peak RAM and open S3/aiohttp sessions scale with the
+        # number of parallel workers. Rhapso calls a bare ray.init(), so default its
+        # num_cpus here -- fewer, fatter workers (e.g. 4 on a 128 GB box = ~32 GB each)
+        # avoid the worker OOM/crash seen when Ray fans out to every core.
+        max_workers = int(os.environ.get("RAY_MAX_WORKERS", "4"))
+        _orig_ray_init = ray.init
+        ray.init = lambda *a, **k: _orig_ray_init(
+            *a, **{"num_cpus": max_workers, "ignore_reinit_error": True, **k})
+        print(f"Ray worker cap: {max_workers} (override with RAY_MAX_WORKERS)")
+
         AffineFusion(
             aligned_xml_path=ccf_xml,          # transforms + tile sizes (same as CCF)
             zarr_input_prefix=mask_prefix,     # read the v3 mask tiles instead of the signal
