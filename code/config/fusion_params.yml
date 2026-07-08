@@ -2,11 +2,12 @@
 # (fused_ccf_ch) so registration can multiply the mask into the sample.
 
 # AFFINE FUSION
-block_size: [128, 128, 384]           # xyz, per-task output block
+block_size: [128, 128, 256]           # xyz, per-task output block (all 128-multiples; kept
+                                      # small to bound per-task RAM -- the v3 mask tiles are
+                                      # sharded (512^3), so each read materializes whole shards)
 intensity_range: [0, 65535]           # uint16 output range
-block_scale: [1, 1, 1]                # xyz, blocks per Ray task -- [1,1,1] = one 256x256x384
-                                      # block per worker (~4x less peak RAM than [2,2,1]);
-                                      # raise only if the instance has ample RAM/vCPU.
+block_scale: [1, 1, 1]                # xyz, blocks per Ray task -- [1,1,1] = one block/task
+                                      # (raise only with ample RAM/vCPU headroom per worker)
 overlap_strategy: "lowest_view_wins"  # crisp binary mask (no fractional blended edges)
 output_zarr_version: 2                # registration reads Zarr v2
 

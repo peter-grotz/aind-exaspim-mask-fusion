@@ -135,11 +135,13 @@ def main() -> int:
         from Rhapso.pipelines.ray.multiscale import MultiScale
         import ray
 
-        # Cap Ray concurrency: peak RAM and open S3/aiohttp sessions scale with the
-        # number of parallel workers. Rhapso calls a bare ray.init(), so default its
-        # num_cpus here -- fewer, fatter workers (e.g. 4 on a 128 GB box = ~32 GB each)
-        # avoid the worker OOM/crash seen when Ray fans out to every core.
-        max_workers = int(os.environ.get("RAY_MAX_WORKERS", "4"))
+        # Cap Ray concurrency: peak RAM scales with the number of parallel workers
+        # times the per-task read. The v3 mask tiles are sharded (512^3 shards), so a
+        # single fuse task materializes whole shards -- far more RAM than the small
+        # output block implies. Rhapso calls a bare ray.init(), so default its num_cpus
+        # here -- fewer, fatter workers (2 on a 128 GB box = ~64 GB each) keep the
+        # concurrent heavy shard reads under the node's memory ceiling.
+        max_workers = int(os.environ.get("RAY_MAX_WORKERS", "2"))
         _orig_ray_init = ray.init
         ray.init = lambda *a, **k: _orig_ray_init(
             *a, **{"num_cpus": max_workers, "ignore_reinit_error": True, **k})
