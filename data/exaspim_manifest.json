@@ -1,0 +1,5 @@
+{
+    "zarr_multiscale": {
+        "input_uri": "s3://aind-open-data/exaSPIM_709221_2025-05-16_12-00-49_processed_2025-06-26_13-51-22/fusion/fused_ccf_ch.zarr/"
+    }
+}
