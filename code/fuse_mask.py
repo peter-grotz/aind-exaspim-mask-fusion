@@ -30,6 +30,12 @@ from urllib.parse import urlparse
 import boto3
 import yaml
 
+# Retry transient S3 errors up to 100x so a blip on a tile-metadata read isn't
+# seen as GroupNotFound and dropped as an empty block (hole). Also set in code/run;
+# set here before any boto3/s3fs client is created and before ray.init() so the
+# local Ray workers inherit it too.
+os.environ.setdefault("AWS_MAX_ATTEMPTS", "100")
+
 CONFIG_PATH = "/code/config/fusion_params.yml"
 CCF_XML_REL = "tile_alignment/ch_ccf_xmls/bigstitcher_split_affine_ch_ccf.xml"
 MASK_TILES_REL = "flatfield_correction/mask/SPIM.ome.zarr"

@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
 set -e
 export AWS_REGION=us-west-2
+# Retry transient S3 errors aggressively in every worker. Under Ray fan-out a
+# tile-metadata read can fail transiently (503 SlowDown / timeout); Rhapso then
+# sees GroupNotFound and leaves that fused block empty -> a hole. 100 attempts
+# rides out the blip. (Confirmed to eliminate missing blocks in cluster runs.)
+export AWS_MAX_ATTEMPTS=100
 python -u fuse_mask.py
