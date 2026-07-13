@@ -177,9 +177,6 @@ def main() -> int:
         import ray
 
         # Rhapso manages its own local Ray runtime (bare ray.init() -> all cores).
-        # Size the instance for RAM: each parallel fuse worker holds a per-task read
-        # (the v3 mask tiles are sharded at 512^3, so a read materializes whole shards),
-        # so peak RAM ~= n_cores * per-task read.
         AffineFusion(
             aligned_xml_path=ccf_xml,          # transforms + tile sizes (same as CCF)
             zarr_input_prefix=mask_prefix,     # read the v3 mask tiles instead of the signal
