@@ -5,16 +5,6 @@ Reads the cp_jsons manifest to locate the CCF split-affine alignment XML and the
 mask tiles, fuses the mask onto the CCF-channel grid with Rhapso AffineFusion +
 MultiScale, and writes fusion/fused_mask_ch.zarr (Zarr v2). The mask tiles are
 Zarr v3 (which Rhapso reads); the output is v2 (which registration reads).
-
-Rhapso reads tiles from `zarr_input_prefix` + each tile's relative path in the
-XML, so pointing the prefix at the mask tiles fuses the mask with the CCF
-channel's transforms -- no XML editing needed.
-
-Best-effort leaf: ANY failure (including a missing manifest) removes the partial
-output and exits 0 so the pipeline continues (registration runs unmasked).
-
-S3 I/O uses boto3 (already a Rhapso dependency) -- no AWS CLI needed, which keeps
-the environment expressible through the Code Ocean GUI editor.
 """
 from __future__ import annotations
 
