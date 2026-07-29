@@ -29,6 +29,7 @@ from urllib.parse import urlparse
 
 import boto3
 import yaml
+from botocore.exceptions import ClientError
 
 # Retry transient S3 errors up to 100x so a blip on a tile-metadata read isn't
 # seen as GroupNotFound and dropped as an empty block (hole). Also set in code/run;
@@ -37,7 +38,15 @@ import yaml
 os.environ.setdefault("AWS_MAX_ATTEMPTS", "100")
 
 CONFIG_PATH = "/code/config/fusion_params.yml"
-CCF_XML_REL = "tile_alignment/ch_ccf_xmls/bigstitcher_split_affine_ch_ccf.xml"
+
+# The CCF split-affine XML moved when tile alignment switched from BigStitcher to
+# Rhapso: assets processed through ~2026-07 carry ch_ccf_xmls/, later ones rhapso/.
+# Exactly one of the two exists per asset. Legacy path first, so a previously-fused
+# sample re-fuses from the same XML it was fused with.
+CCF_XML_RELS = (
+    "tile_alignment/ch_ccf_xmls/bigstitcher_split_affine_ch_ccf.xml",
+    "tile_alignment/rhapso/rhapso-solver-split-affine-ccf.xml",
+)
 MASK_TILES_REL = "flatfield_correction/mask/SPIM.ome.zarr"
 
 
@@ -61,6 +70,33 @@ def read_manifest_input_uri() -> str:
 def s3_read(uri: str) -> bytes:
     bucket, key = _split_s3(uri)
     return boto3.client("s3").get_object(Bucket=bucket, Key=key)["Body"].read()
+
+
+def s3_exists(uri: str) -> bool:
+    """True if the key exists. Only a definitive not-found answers False -- a 403 or
+    a throttle is re-raised rather than reported as absent, so a transient blip can't
+    be misread as 'this layout isn't here' and silently select the wrong XML."""
+    bucket, key = _split_s3(uri)
+    try:
+        boto3.client("s3").head_object(Bucket=bucket, Key=key)
+        return True
+    except ClientError as e:
+        if e.response.get("Error", {}).get("Code") in ("404", "NoSuchKey", "NotFound"):
+            return False
+        raise
+
+
+def resolve_ccf_xml(in_base: str) -> str:
+    """First CCF_XML_RELS candidate that exists under the input asset."""
+    for rel in CCF_XML_RELS:
+        uri = f"{in_base}/{rel}"
+        if s3_exists(uri):
+            print(f"ccf xml     : resolved to {rel}")
+            return uri
+        print(f"ccf xml     : not at {rel}")
+    raise RuntimeError(
+        f"no CCF split-affine XML under {in_base}/tile_alignment/ "
+        f"(checked: {', '.join(CCF_XML_RELS)})")
 
 
 def voxel_size_zyx(xml_bytes: bytes) -> list[float]:
@@ -101,11 +137,11 @@ def s3_rm_recursive(uri: str) -> None:
         s3.delete_objects(Bucket=bucket, Delete={"Objects": batch})
 
 
-def emit_record(start: str, status: str) -> None:
+def emit_record(start: str, status: str, input_xml: str | None = None) -> None:
     """Emit the process record in-process."""
     try:
         import emit_mask_fusion_record
-        emit_mask_fusion_record.emit(start, status)
+        emit_mask_fusion_record.emit(start, status, input_xml)
     except Exception as e:
         print(f"WARNING: could not emit mask fusion record ({type(e).__name__}: {e})",
               file=sys.stderr)
@@ -115,6 +151,7 @@ def main() -> int:
     start = _now()
     status = "SUCCESS"
     mask_out = None
+    ccf_xml_rel = None
     try:
         cfg = yaml.safe_load(Path(CONFIG_PATH).read_text())
         input_uri = read_manifest_input_uri()      # s3://.../<asset>/fusion/fused_ccf_ch.zarr/
@@ -124,13 +161,13 @@ def main() -> int:
         scratch = os.environ.get("OUTPUT_PREFIX", "").rstrip("/")
         out_base = f"{scratch}/{in_base.rstrip('/').split('/')[-1]}" if scratch else in_base
 
-        ccf_xml = f"{in_base}/{CCF_XML_REL}"
         mask_prefix = f"{in_base}/{MASK_TILES_REL}"
         mask_out = f"{out_base}/fusion/fused_mask_ch.zarr"
 
         print(f"input asset : {in_base}")
         print(f"output base : {out_base}")
-        print(f"ccf xml     : {ccf_xml}")
+        ccf_xml = resolve_ccf_xml(in_base)
+        ccf_xml_rel = ccf_xml[len(in_base) + 1:]   # recorded in the process metadata
         print(f"mask tiles  : {mask_prefix}")
         print(f"mask output : {mask_out}")
 
@@ -192,7 +229,7 @@ def main() -> int:
             except Exception as ce:
                 print(f"  (partial-output cleanup failed: {ce})", file=sys.stderr)
 
-    emit_record(start, status)
+    emit_record(start, status, ccf_xml_rel)
     print(f"mask fusion status: {status}")
     return 0  # leaf node: a mask failure must not fail the pipeline
 

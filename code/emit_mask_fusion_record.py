@@ -6,8 +6,8 @@ merges it into the root processing.json (it mounts this capsule's /results at
 ../data/mask_fusion -- MASK_META_DIR -- a separate mount from the CCF fusion
 record to avoid a Nextflow input-name collision).
 
-Importable: call emit(start, status) in-process. Also runnable:
-    python emit_mask_fusion_record.py [START_ISO] [STATUS]
+Importable: call emit(start, status, input_xml) in-process. Also runnable:
+    python emit_mask_fusion_record.py [START_ISO] [STATUS] [INPUT_XML_REL]
 """
 import os
 import sys
@@ -20,14 +20,16 @@ def _now():
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def emit(start=None, status="SUCCESS"):
+def emit(start=None, status="SUCCESS", input_xml=None):
     start = start or _now()
     end = _now()
 
     parameters = {
         "engine": "Rhapso",
         "rhapso_version": os.environ.get("RHAPSO_VERSION", "0.4.1"),
-        "input_xml": "tile_alignment/ch_ccf_xmls/bigstitcher_split_affine_ch_ccf.xml",
+        # Resolved at run time: the CCF XML lives under ch_ccf_xmls/ on older assets
+        # and rhapso/ on newer ones, so record which one this run actually read.
+        "input_xml": input_xml or "unresolved",
         "input_tiles": "flatfield_correction/mask/SPIM.ome.zarr",
         "output_zarr_version": 2,
         "overlap_strategy": "lowest_view_wins",
@@ -60,7 +62,8 @@ def emit(start=None, status="SUCCESS"):
 def main():
     start = sys.argv[1] if len(sys.argv) > 1 else None
     status = sys.argv[2] if len(sys.argv) > 2 else "SUCCESS"
-    emit(start, status)
+    input_xml = sys.argv[3] if len(sys.argv) > 3 else None
+    emit(start, status, input_xml)
 
 
 if __name__ == "__main__":
