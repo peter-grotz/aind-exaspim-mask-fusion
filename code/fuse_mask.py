@@ -9,6 +9,7 @@ Zarr v3 (which Rhapso reads); the output is v2 (which registration reads).
 from __future__ import annotations
 
 import glob
+import inspect
 import json
 import os
 import sys
@@ -98,19 +99,89 @@ def voxel_size_zyx(xml_bytes: bytes) -> list[float]:
     return xyz[::-1]  # ZYX for MultiScale
 
 
-def verify_level3(mask_out: str) -> None:
-    """Confirm the level registration reads (3) holds chunk data, so an empty fusion
-    is caught at the source rather than silently ignored downstream. (A degenerate-
-    but-present mask is still caught by registration's foreground gate.)"""
+def s3_prefix_exists(uri: str) -> bool:
+    """True if at least one object exists under `uri` as a prefix (zarr groups are
+    prefixes, not keys, so head_object cannot answer this)."""
+    bucket, prefix = _split_s3(f"{uri.rstrip('/')}/")
+    r = boto3.client("s3").list_objects_v2(Bucket=bucket, Prefix=prefix, MaxKeys=1)
+    return r.get("KeyCount", 0) > 0
+
+
+def first_tile_rel(xml_bytes: bytes) -> str | None:
+    """First zgroup tile path in the XML, e.g. tile_000000_ch_561.ome.zarr.
+
+    BigStitcher writes the path as a zgroup attribute; Rhapso writes it as a child
+    element. Handle both so this works on either asset vintage.
+    """
+    root = ET.fromstring(xml_bytes)
+    for zg in root.iter("zgroup"):
+        path = zg.get("path") or zg.findtext("path")
+        if path and path.strip():
+            return path.strip()
+    return None
+
+
+def _level3_has_chunks(mask_out: str) -> bool:
+    """True if level 3 holds at least one real chunk object (not just metadata)."""
     bucket, prefix = _split_s3(f"{mask_out.rstrip('/')}/3/")
     s3 = boto3.client("s3")
     for page in s3.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefix):
         for obj in page.get("Contents", []):
             name = obj["Key"].rsplit("/", 1)[-1]
             if not name.startswith(".") and name != "zarr.json":
-                return  # a real chunk exists
-    raise RuntimeError(f"fused mask level-3 has no chunk data under s3://{bucket}/{prefix} "
-                       f"-- the fusion produced an empty mask")
+                return True
+    return False
+
+
+def _zarray(level_uri: str) -> dict | None:
+    """Parse a Zarr v2 .zarray at `level_uri`, or None when it isn't v2/absent."""
+    try:
+        return json.loads(s3_read(f"{level_uri.rstrip('/')}/.zarray"))
+    except Exception:
+        return None
+
+
+def verify_level3(mask_out: str, ccf_fused: str | None = None) -> None:
+    """Gate the fused mask on what registration actually needs from level 3.
+
+    Three checks, because "the fusion ran" is not the same as "the mask is usable":
+
+    1. Level 3 holds real chunk data -- catches an empty fusion at the source.
+    2. Level 3 is Zarr v2. Registration pins zarr==2.16.1 and cannot open v3, and
+       MultiScale does not take output_zarr_version, so the pyramid's format is not
+       guaranteed to match AffineFusion's. A v3 level 3 reads to registration as a
+       missing mask.
+    3. Level 3's shape matches fused_ccf_ch.zarr level 3. This is the grid-parity
+       gate: the mask is multiplied into the sample, so a mismatched grid misaligns
+       silently. Registration squeezes two leading axes off, so a mask that is not
+       5-D also reads as missing. Skipped with a warning if the CCF reference cannot
+       be read -- an unreadable reference is no reason to discard a good mask.
+    """
+    if not _level3_has_chunks(mask_out):
+        bucket, prefix = _split_s3(f"{mask_out.rstrip('/')}/3/")
+        raise RuntimeError(f"fused mask level-3 has no chunk data under s3://{bucket}/{prefix} "
+                           f"-- the fusion produced an empty mask")
+
+    mask_meta = _zarray(f"{mask_out}/3")
+    if mask_meta is None:
+        raise RuntimeError(
+            f"fused mask level-3 has no Zarr v2 .zarray at {mask_out}/3 -- it was most "
+            f"likely written as v3, which registration (zarr==2.16.1) cannot open")
+
+    if not ccf_fused:
+        print("verify: no CCF reference given; skipping grid-parity check")
+        return
+    ccf_meta = _zarray(f"{ccf_fused}/3")
+    if ccf_meta is None:
+        print(f"WARNING: could not read {ccf_fused}/3/.zarray; skipping grid-parity check",
+              file=sys.stderr)
+        return
+    if list(mask_meta.get("shape", [])) != list(ccf_meta.get("shape", [])):
+        raise RuntimeError(
+            f"fused mask level-3 shape {mask_meta.get('shape')} != fused_ccf_ch level-3 "
+            f"shape {ccf_meta.get('shape')} -- the mask is on a different grid than the "
+            f"sample it multiplies into")
+    print(f"verify: level-3 grid matches fused_ccf_ch {ccf_meta.get('shape')} (Zarr v2)")
 
 
 def s3_rm_recursive(uri: str) -> None:
@@ -142,6 +213,7 @@ def main() -> int:
     status = "SUCCESS"
     mask_out = None
     ccf_xml_rel = None
+    began_writing = False   # True once this run has cleared/started writing the output
     try:
         cfg = yaml.safe_load(Path(CONFIG_PATH).read_text())
         input_uri = read_manifest_input_uri()      # s3://.../<asset>/fusion/fused_ccf_ch.zarr/
@@ -161,20 +233,41 @@ def main() -> int:
         print(f"mask tiles  : {mask_prefix}")
         print(f"mask output : {mask_out}")
 
-        vsz = voxel_size_zyx(s3_read(ccf_xml))
+        xml_bytes = s3_read(ccf_xml)
+        vsz = voxel_size_zyx(xml_bytes)
 
-        # Start from a clean output. Rhapso >=0.3.9 opens the output group in append
-        # mode and (as of 0.4.1) refuses to append when an existing store's Zarr
-        # format differs from output_zarr_version -- so a stale v3 partial from an
-        # earlier run would abort a v2 run. Removing it first also avoids resuming
-        # onto a half-written pyramid. The mask is regenerated in full every run.
-        print(f"clearing any existing output at {mask_out}")
-        s3_rm_recursive(mask_out)
+        # Pre-flight, before anything destructive: confirm the mask tiles the XML names
+        # actually exist under the mask prefix. Rhapso composes zarr_input_prefix with
+        # the XML's relative tile paths, and those carry both the channel (which varies
+        # per asset) and the .zarr vs .ome.zarr suffix (which changed between vintages).
+        # A mismatch would otherwise surface only as GroupNotFound per tile and an empty
+        # fusion -- after the previous good mask had been deleted.
+        tile_rel = first_tile_rel(xml_bytes)
+        if tile_rel:
+            probe = f"{mask_prefix}/{tile_rel}"
+            if not s3_prefix_exists(probe):
+                raise RuntimeError(
+                    f"the XML's first tile is not present under the mask prefix: {probe} "
+                    f"-- channel or suffix mismatch between the CCF XML and the mask tiles")
+            print(f"mask tiles  : verified {tile_rel} present")
 
         # Imported here so an import error is caught by the graceful-degradation path.
         from Rhapso.pipelines.ray.affine_fusion import AffineFusion
         from Rhapso.pipelines.ray.multiscale import MultiScale
         import ray
+
+        # Only now -- inputs verified and the runtime importable -- clear the old output.
+        # Rhapso >=0.3.9 opens the output group in append mode and (as of 0.4.1) refuses
+        # to append when an existing store's Zarr format differs from output_zarr_version,
+        # so a stale v3 partial would abort a v2 run; removing it also avoids resuming
+        # onto a half-written pyramid. The mask is regenerated in full every run.
+        #
+        # Deliberately the LAST thing before writing: everything above can fail without
+        # destroying a working mask, and began_writing gates the cleanup below so a
+        # failure that never got here cannot delete one either.
+        print(f"clearing any existing output at {mask_out}")
+        s3_rm_recursive(mask_out)
+        began_writing = True
 
         # Rhapso manages its own local Ray runtime (bare ray.init() -> all cores).
         AffineFusion(
@@ -192,7 +285,12 @@ def main() -> int:
         # MultiScale (which uses dask) so the two don't hold memory simultaneously.
         ray.shutdown()
 
-        MultiScale(
+        # AffineFusion takes output_zarr_version; MultiScale may not, and Rhapso pins
+        # zarr>=3, so the pyramid's format is not guaranteed to match level 0. Pass the
+        # setting only when this build's signature accepts it -- blindly passing an
+        # unsupported kwarg would TypeError and, on a best-effort leaf, silently cost the
+        # mask. verify_level3 asserts level 3 is really v2 either way.
+        ms_kwargs = dict(
             zarr_path=mask_out,
             chunk_size=cfg["multiscale_chunk_size"],
             voxel_size=vsz,
@@ -200,20 +298,38 @@ def main() -> int:
             scale_factor=cfg["scale_factor"],
             target_block_size_mb=cfg["target_block_size_mb"],
             base_level=cfg["base_level"],
-        ).run()
+        )
+        try:
+            takes_version = "output_zarr_version" in inspect.signature(MultiScale).parameters
+        except (TypeError, ValueError):
+            takes_version = False
+        if takes_version:
+            ms_kwargs["output_zarr_version"] = cfg["output_zarr_version"]
+            print(f"MultiScale: output_zarr_version={cfg['output_zarr_version']}")
+        else:
+            print("MultiScale: this build takes no output_zarr_version; "
+                  "level-3 format is asserted after the run")
+        MultiScale(**ms_kwargs).run()
 
-        verify_level3(mask_out)
+        verify_level3(mask_out, ccf_fused=f"{in_base}/fusion/fused_ccf_ch.zarr")
         print("mask fusion + multiscale complete")
 
     except Exception as e:  # best-effort leaf: never fail the pipeline on the mask
         status = "FAILED"
-        print(f"WARNING: mask fusion failed ({type(e).__name__}: {e}); removing partial "
-              f"output and continuing unmasked.", file=sys.stderr)
-        if mask_out:
+        print(f"WARNING: mask fusion failed ({type(e).__name__}: {e}); continuing unmasked.",
+              file=sys.stderr)
+        # Only remove output this run actually started writing. Without this gate a
+        # failure in the read-only setup above (manifest, XML resolution, a transient S3
+        # error) would delete a perfectly good mask from a previous run that this run
+        # never touched.
+        if mask_out and began_writing:
             try:
+                print("  removing this run's partial output", file=sys.stderr)
                 s3_rm_recursive(mask_out)
             except Exception as ce:
                 print(f"  (partial-output cleanup failed: {ce})", file=sys.stderr)
+        elif mask_out:
+            print(f"  left {mask_out} untouched (failed before writing began)", file=sys.stderr)
 
     emit_record(start, status, ccf_xml_rel)
     print(f"mask fusion status: {status}")
