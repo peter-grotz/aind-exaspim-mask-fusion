@@ -107,18 +107,86 @@ def s3_prefix_exists(uri: str) -> bool:
     return r.get("KeyCount", 0) > 0
 
 
-def first_tile_rel(xml_bytes: bytes) -> str | None:
-    """First zgroup tile path in the XML, e.g. tile_000000_ch_561.ome.zarr.
-
-    BigStitcher writes the path as a zgroup attribute; Rhapso writes it as a child
-    element. Handle both so this works on either asset vintage.
-    """
-    root = ET.fromstring(xml_bytes)
+def zgroup_tiles(root) -> dict:
+    """base setup id -> tile path. BigStitcher writes the path as a zgroup attribute,
+    Rhapso as a child element; handle both."""
+    tiles = {}
     for zg in root.iter("zgroup"):
         path = zg.get("path") or zg.findtext("path")
         if path and path.strip():
-            return path.strip()
-    return None
+            tiles[int(zg.get("setup"))] = path.strip()
+    return tiles
+
+
+def drop_absent_tiles(xml_bytes: bytes, mask_prefix: str) -> tuple[bytes, list, dict]:
+    """Remove views whose mask tile is absent, returning (xml, dropped, bbox_delta).
+
+    The flat-field step omits a mask tile when it finds no brain in it -- normally the
+    corner tiles -- so the CCF XML references tiles that do not exist under the mask
+    prefix. Rhapso indexes its path map directly, so those views raise GroupNotFound
+    mid-fusion. Drop them instead.
+
+    Rhapso derives the output bounding box from the same ViewRegistration loop it
+    derives tile paths from, so dropping a view also drops its bbox contribution.
+    bbox_delta reports that shift so the caller can log it and verify the result.
+    """
+    root = ET.fromstring(xml_bytes)
+    tiles = zgroup_tiles(root)
+    absent = {sid: rel for sid, rel in tiles.items()
+              if not s3_prefix_exists(f"{mask_prefix}/{rel}")}
+    if not absent:
+        return xml_bytes, [], {}
+    if len(absent) == len(tiles):
+        raise RuntimeError(
+            f"no mask tiles present under {mask_prefix} "
+            f"({len(tiles)} referenced by the XML) -- the mask was never generated")
+
+    before = _bbox(root)
+    # Split XMLs map each split view (NewId) back to a base tile (OldId).
+    setup_ids = root.find("./SequenceDescription/ImageLoader/SetupIds")
+    doomed, defs = set(), []
+    if setup_ids is not None:
+        for d in setup_ids.findall("./SetupIdDefinition"):
+            if int(d.findtext("./OldId")) in absent:
+                doomed.add(int(d.findtext("./NewId")))
+                defs.append(d)
+        for d in defs:
+            setup_ids.remove(d)
+    else:
+        doomed = set(absent)
+
+    vs = root.find("./SequenceDescription/ViewSetups")
+    for v in [v for v in vs.findall("./ViewSetup") if int(v.findtext("./id")) in doomed]:
+        vs.remove(v)
+    vr = root.find("./ViewRegistrations")
+    for r in [r for r in vr.findall("./ViewRegistration") if int(r.get("setup")) in doomed]:
+        vr.remove(r)
+
+    after = _bbox(root)
+    delta = {"origin_shift": (after[0] - before[0]).tolist(),
+             "dims_change": ((after[1] - after[0]) - (before[1] - before[0])).tolist()}
+    return ET.tostring(root), sorted(absent.values()), delta
+
+
+def _bbox(root):
+    """Output bbox min/max the way Rhapso's ComputeBBox derives it."""
+    import numpy as np
+    sizes = {int(v.findtext("./id")): [int(x) for x in v.findtext("./size").split()]
+             for v in root.findall("./SequenceDescription/ViewSetups/ViewSetup")}
+    lo = np.full(3, np.inf)
+    hi = np.full(3, -np.inf)
+    for r in root.findall("./ViewRegistrations/ViewRegistration"):
+        T = np.eye(4)
+        for vt in r.findall("./ViewTransform"):
+            M = np.eye(4)
+            M[:3, :] = np.array([float(x) for x in vt.findtext("./affine").split()]).reshape(3, 4)
+            T = T @ M
+        sx, sy, sz = sizes[int(r.get("setup"))]
+        C = np.array([[x, y, z, 1.0] for x in (0, sx - 1) for y in (0, sy - 1) for z in (0, sz - 1)]).T
+        w = (T @ C)[:3]
+        lo = np.minimum(lo, w.min(axis=1))
+        hi = np.maximum(hi, w.max(axis=1))
+    return np.floor(lo), np.ceil(hi)
 
 
 def _level3_has_chunks(mask_out: str) -> bool:
@@ -236,20 +304,20 @@ def main() -> int:
         xml_bytes = s3_read(ccf_xml)
         vsz = voxel_size_zyx(xml_bytes)
 
-        # Pre-flight, before anything destructive: confirm the mask tiles the XML names
-        # actually exist under the mask prefix. Rhapso composes zarr_input_prefix with
-        # the XML's relative tile paths, and those carry both the channel (which varies
-        # per asset) and the .zarr vs .ome.zarr suffix (which changed between vintages).
-        # A mismatch would otherwise surface only as GroupNotFound per tile and an empty
-        # fusion -- after the previous good mask had been deleted.
-        tile_rel = first_tile_rel(xml_bytes)
-        if tile_rel:
-            probe = f"{mask_prefix}/{tile_rel}"
-            if not s3_prefix_exists(probe):
-                raise RuntimeError(
-                    f"the XML's first tile is not present under the mask prefix: {probe} "
-                    f"-- channel or suffix mismatch between the CCF XML and the mask tiles")
-            print(f"mask tiles  : verified {tile_rel} present")
+        # Drop views whose mask tile the flat-field step omitted. Runs before anything
+        # destructive, and raises if no tiles are present at all.
+        filtered, dropped, delta = drop_absent_tiles(xml_bytes, mask_prefix)
+        aligned_xml = ccf_xml
+        if dropped:
+            out = Path("/results/mask_fusion")
+            out.mkdir(parents=True, exist_ok=True)
+            aligned_xml = str(out / "ccf_split_affine_filtered.xml")
+            Path(aligned_xml).write_bytes(filtered)
+            print(f"mask tiles  : {len(dropped)} absent, views dropped: {dropped}")
+            print(f"mask tiles  : bbox origin shift {delta['origin_shift']}, "
+                  f"dims change {delta['dims_change']} (level-0 voxels)")
+        else:
+            print("mask tiles  : all referenced tiles present")
 
         # Imported here so an import error is caught by the graceful-degradation path.
         from Rhapso.pipelines.ray.affine_fusion import AffineFusion
@@ -271,7 +339,7 @@ def main() -> int:
 
         # Rhapso manages its own local Ray runtime (bare ray.init() -> all cores).
         AffineFusion(
-            aligned_xml_path=ccf_xml,          # transforms + tile sizes (same as CCF)
+            aligned_xml_path=aligned_xml,      # transforms + tile sizes (same as CCF)
             zarr_input_prefix=mask_prefix,     # read the v3 mask tiles instead of the signal
             output_path=mask_out,
             block_size=cfg["block_size"],
