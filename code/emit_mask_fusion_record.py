@@ -20,19 +20,21 @@ def _now():
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def emit(start=None, status="SUCCESS", input_xml=None):
+def emit(start=None, status="SUCCESS", input_xml=None, config=None):
     start = start or _now()
     end = _now()
+    config = config or {}
 
     parameters = {
         "engine": "Rhapso",
         "rhapso_version": os.environ.get("RHAPSO_VERSION", "0.4.1"),
-        # Resolved at run time: the CCF XML lives under ch_ccf_xmls/ on older assets
-        # and rhapso/ on newer ones, so record which one this run actually read.
+        # Taken from the run's resolved path and its actual config, not restated here --
+        # a hardcoded overlap_strategy previously reported lowest_view_wins while the
+        # config said max_blend, hiding the setting that was failing every fusion task.
         "input_xml": input_xml or "unresolved",
         "input_tiles": "flatfield_correction/mask/SPIM.ome.zarr",
-        "output_zarr_version": 2,
-        "overlap_strategy": "lowest_view_wins",
+        "output_zarr_version": config.get("output_zarr_version", "unknown"),
+        "overlap_strategy": config.get("overlap_strategy", "unknown"),
         "mask_fusion_status": status,
     }
 

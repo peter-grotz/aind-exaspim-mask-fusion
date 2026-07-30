@@ -12,9 +12,9 @@ block_size: [256, 256, 256]           # xyz, per-task output block. MUST stay >=
 intensity_range: [0, 65535]           # uint16 output range
 block_scale: [1, 1, 1]                # xyz, blocks per Ray task -- [1,1,1] = one block/task
                                       # (raise only with ample RAM/vCPU headroom per worker)
-overlap_strategy: "max_blend"         # union in overlaps, and still crisp on a binary mask.
-                                      # lowest_view_wins breaks ties by view index, so an empty
-                                      # low-index tile can erase a neighbour's mask.
+overlap_strategy: "lowest_view_wins"  # crisp binary mask (no fractional blended edges).
+                                      # NOT max_blend: Rhapso 0.4.1 rejects it
+                                      # ("Unknown fusion_type"), it landed after that release.
 output_zarr_version: 2                # registration reads Zarr v2
 
 # MULTISCALE  (level 3 = 8x downsample = the level registration reads)

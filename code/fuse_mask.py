@@ -266,11 +266,12 @@ def s3_rm_recursive(uri: str) -> None:
         s3.delete_objects(Bucket=bucket, Delete={"Objects": batch})
 
 
-def emit_record(start: str, status: str, input_xml: str | None = None) -> None:
+def emit_record(start: str, status: str, input_xml: str | None = None,
+                config: dict | None = None) -> None:
     """Emit the process record in-process."""
     try:
         import emit_mask_fusion_record
-        emit_mask_fusion_record.emit(start, status, input_xml)
+        emit_mask_fusion_record.emit(start, status, input_xml, config)
     except Exception as e:
         print(f"WARNING: could not emit mask fusion record ({type(e).__name__}: {e})",
               file=sys.stderr)
@@ -281,6 +282,7 @@ def main() -> int:
     status = "SUCCESS"
     mask_out = None
     ccf_xml_rel = None
+    cfg = {}
     began_writing = False   # True once this run has cleared/started writing the output
     try:
         cfg = yaml.safe_load(Path(CONFIG_PATH).read_text())
@@ -399,7 +401,7 @@ def main() -> int:
         elif mask_out:
             print(f"  left {mask_out} untouched (failed before writing began)", file=sys.stderr)
 
-    emit_record(start, status, ccf_xml_rel)
+    emit_record(start, status, ccf_xml_rel, cfg)
     print(f"mask fusion status: {status}")
     return 0  # leaf node: a mask failure must not fail the pipeline
 
