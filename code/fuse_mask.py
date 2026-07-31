@@ -252,18 +252,44 @@ def verify_level3(mask_out: str, ccf_fused: str | None = None) -> None:
     print(f"verify: level-3 grid matches fused_ccf_ch {ccf_meta.get('shape')} (Zarr v2)")
 
 
-def s3_rm_recursive(uri: str) -> None:
+def s3_rm_recursive(uri: str) -> int:
+    """Delete everything under `uri`, returning the number of keys deleted.
+
+    delete_objects reports per-key failures in an Errors list rather than raising, so
+    those are collected and raised. Keys are gathered before any delete so the listing
+    is not mutated while it is being paginated.
+    """
     bucket, prefix = _split_s3(f"{uri.rstrip('/')}/")
     s3 = boto3.client("s3")
-    batch: list[dict] = []
-    for page in s3.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefix):
-        for obj in page.get("Contents", []):
-            batch.append({"Key": obj["Key"]})
-            if len(batch) == 1000:
-                s3.delete_objects(Bucket=bucket, Delete={"Objects": batch})
-                batch = []
-    if batch:
-        s3.delete_objects(Bucket=bucket, Delete={"Objects": batch})
+    keys = [{"Key": o["Key"]}
+            for page in s3.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefix)
+            for o in page.get("Contents", [])]
+    errors = []
+    for i in range(0, len(keys), 1000):
+        r = s3.delete_objects(Bucket=bucket, Delete={"Objects": keys[i:i + 1000]})
+        errors += r.get("Errors", [])
+    if errors:
+        raise RuntimeError(
+            f"{len(errors)} of {len(keys)} keys under s3://{bucket}/{prefix} could not be "
+            f"deleted, e.g. {errors[:3]}")
+    return len(keys)
+
+
+def assert_prefix_empty(uri: str) -> None:
+    """Fail if anything remains under `uri`.
+
+    The bucket is versioned, so a delete that never reached S3 leaves no delete marker
+    and no error -- indistinguishable from success unless the result is re-listed. A
+    surviving .zarray/zarr.json describes a different array than the chunks a new run
+    writes over it, which is silent corruption rather than a visible failure.
+    """
+    bucket, prefix = _split_s3(f"{uri.rstrip('/')}/")
+    r = boto3.client("s3").list_objects_v2(Bucket=bucket, Prefix=prefix, MaxKeys=20)
+    if r.get("KeyCount", 0):
+        left = [o["Key"].replace(prefix, "") for o in r.get("Contents", [])]
+        raise RuntimeError(
+            f"{r['KeyCount']}+ objects still under s3://{bucket}/{prefix} after the "
+            f"pre-clean: {left}. Refusing to fuse onto a store that was not cleared.")
 
 
 def emit_record(start: str, status: str, input_xml: str | None = None,
@@ -336,7 +362,9 @@ def main() -> int:
         # destroying a working mask, and began_writing gates the cleanup below so a
         # failure that never got here cannot delete one either.
         print(f"clearing any existing output at {mask_out}")
-        s3_rm_recursive(mask_out)
+        n = s3_rm_recursive(mask_out)
+        assert_prefix_empty(mask_out)
+        print(f"cleared {n} objects, prefix verified empty")
         began_writing = True
 
         # Rhapso manages its own local Ray runtime (bare ray.init() -> all cores).
