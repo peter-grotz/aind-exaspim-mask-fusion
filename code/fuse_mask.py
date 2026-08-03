@@ -251,44 +251,6 @@ def verify_level3(mask_out: str, ccf_fused: str | None = None) -> None:
     print(f"verify: level-3 grid matches fused_ccf_ch {ccf_meta.get('shape')} (Zarr v2)")
 
 
-def s3_rm_recursive(uri: str) -> int:
-    """Delete everything under `uri`, returning the number of keys deleted.
-
-    delete_objects reports per-key failures in an Errors list rather than raising, so
-    those are collected and raised. Keys are gathered before any delete so the listing
-    is not mutated while it is being paginated.
-    """
-    bucket, prefix = _split_s3(f"{uri.rstrip('/')}/")
-    s3 = boto3.client("s3")
-    keys = [{"Key": o["Key"]}
-            for page in s3.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefix)
-            for o in page.get("Contents", [])]
-    errors = []
-    for i in range(0, len(keys), 1000):
-        r = s3.delete_objects(Bucket=bucket, Delete={"Objects": keys[i:i + 1000]})
-        errors += r.get("Errors", [])
-    if errors:
-        raise RuntimeError(
-            f"{len(errors)} of {len(keys)} keys under s3://{bucket}/{prefix} could not be "
-            f"deleted, e.g. {errors[:3]}")
-    return len(keys)
-
-
-def assert_prefix_empty(uri: str) -> None:
-    """Fail if anything remains under `uri`.
-
-    The bucket is versioned, so a delete that never reached S3 leaves no delete marker
-    and no error -- indistinguishable from success unless the result is re-listed. A
-    surviving .zarray/zarr.json describes a different array than the chunks a new run
-    writes over it, which is silent corruption rather than a visible failure.
-    """
-    bucket, prefix = _split_s3(f"{uri.rstrip('/')}/")
-    r = boto3.client("s3").list_objects_v2(Bucket=bucket, Prefix=prefix, MaxKeys=20)
-    if r.get("KeyCount", 0):
-        left = [o["Key"].replace(prefix, "") for o in r.get("Contents", [])]
-        raise RuntimeError(
-            f"{r['KeyCount']}+ objects still under s3://{bucket}/{prefix} after the "
-            f"pre-clean: {left}. Refusing to fuse onto a store that was not cleared.")
 
 
 def emit_record(start: str, status: str, input_xml: str | None = None,
@@ -308,7 +270,6 @@ def main() -> int:
     mask_out = None
     ccf_xml_rel = None
     cfg = {}
-    began_writing = False   # True once this run has cleared/started writing the output
     try:
         cfg = yaml.safe_load(Path(CONFIG_PATH).read_text())
         input_uri = read_manifest_input_uri()      # s3://.../<asset>/fusion/fused_ccf_ch.zarr/
@@ -351,20 +312,11 @@ def main() -> int:
         from Rhapso.pipelines.ray.multiscale import MultiScale
         import ray
 
-        # Only now -- inputs verified and the runtime importable -- clear the old output.
-        # Rhapso opens the output group in append mode and creates arrays with
-        # overwrite=False, so an existing array is reused and its shape/format kept --
-        # new chunks would land in an old array's description. The mask is regenerated
-        # in full every run, so the prefix must be empty first.
-        #
-        # Deliberately the LAST thing before writing: everything above can fail without
-        # destroying a working mask, and began_writing gates the cleanup below so a
-        # failure that never got here cannot delete one either.
-        print(f"clearing any existing output at {mask_out}")
-        n = s3_rm_recursive(mask_out)
-        assert_prefix_empty(mask_out)
-        print(f"cleared {n} objects, prefix verified empty")
-        began_writing = True
+        # No pre-clean: the capsule's role has PutObject but not DeleteObject on
+        # aind-open-data (verified -- s3:DeleteObject, the bulk API and
+        # s3:DeleteObjectVersion all return AccessDenied). Every run therefore writes
+        # over whatever is already at mask_out and is treated as a fresh run.
+        # verify_level3 is the gate that catches a result the leftovers made unusable.
 
         # Rhapso manages its own local Ray runtime (bare ray.init() -> all cores).
         AffineFusion(
@@ -407,18 +359,11 @@ def main() -> int:
         status = "FAILED"
         print(f"WARNING: mask fusion failed ({type(e).__name__}: {e}); continuing unmasked.",
               file=sys.stderr)
-        # Only remove output this run actually started writing. Without this gate a
-        # failure in the read-only setup above (manifest, XML resolution, a transient S3
-        # error) would delete a perfectly good mask from a previous run that this run
-        # never touched.
-        if mask_out and began_writing:
-            try:
-                print("  removing this run's partial output", file=sys.stderr)
-                s3_rm_recursive(mask_out)
-            except Exception as ce:
-                print(f"  (partial-output cleanup failed: {ce})", file=sys.stderr)
-        elif mask_out:
-            print(f"  left {mask_out} untouched (failed before writing began)", file=sys.stderr)
+        # No cleanup: deletes are denied on this bucket. Whatever was written stays, and
+        # registration falls back to unmasked when level 3 is unreadable or below its
+        # foreground threshold.
+        if mask_out:
+            print(f"  partial output left at {mask_out}", file=sys.stderr)
 
     emit_record(start, status, ccf_xml_rel, cfg)
     print(f"mask fusion status: {status}")
