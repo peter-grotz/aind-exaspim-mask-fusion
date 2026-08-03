@@ -9,7 +9,6 @@ Zarr v3 (which Rhapso reads); the output is v2 (which registration reads).
 from __future__ import annotations
 
 import glob
-import inspect
 import json
 import os
 import sys
@@ -353,10 +352,10 @@ def main() -> int:
         import ray
 
         # Only now -- inputs verified and the runtime importable -- clear the old output.
-        # Rhapso >=0.3.9 opens the output group in append mode and (as of 0.4.1) refuses
-        # to append when an existing store's Zarr format differs from output_zarr_version,
-        # so a stale v3 partial would abort a v2 run; removing it also avoids resuming
-        # onto a half-written pyramid. The mask is regenerated in full every run.
+        # Rhapso opens the output group in append mode and creates arrays with
+        # overwrite=False, so an existing array is reused and its shape/format kept --
+        # new chunks would land in an old array's description. The mask is regenerated
+        # in full every run, so the prefix must be empty first.
         #
         # Deliberately the LAST thing before writing: everything above can fail without
         # destroying a working mask, and began_writing gates the cleanup below so a
@@ -373,41 +372,33 @@ def main() -> int:
             zarr_input_prefix=mask_prefix,     # read the v3 mask tiles instead of the signal
             output_path=mask_out,
             block_size=cfg["block_size"],
+            output_block_size=cfg["output_block_size"],
             intensity_range=cfg["intensity_range"],
-            block_scale=cfg["block_scale"],
             overlap_strategy=cfg["overlap_strategy"],
             output_zarr_version=cfg["output_zarr_version"],
+            compressor_cname=cfg["compressor_cname"],
+            compressor_clevel=cfg["compressor_clevel"],
+            compressor_shuffle=cfg["compressor_shuffle"],
         ).run()
 
         # AffineFusion leaves a local Ray runtime up; free its workers before
         # MultiScale (which uses dask) so the two don't hold memory simultaneously.
         ray.shutdown()
 
-        # AffineFusion takes output_zarr_version; MultiScale may not, and Rhapso pins
-        # zarr>=3, so the pyramid's format is not guaranteed to match level 0. Pass the
-        # setting only when this build's signature accepts it -- blindly passing an
-        # unsupported kwarg would TypeError and, on a best-effort leaf, silently cost the
-        # mask. verify_level3 asserts level 3 is really v2 either way.
-        ms_kwargs = dict(
+        # MultiScale takes no output_zarr_version in any 0.4.x release -- it reads the
+        # format off the store AffineFusion just wrote and matches it. verify_level3
+        # asserts level 3 really came out v2.
+        MultiScale(
             zarr_path=mask_out,
             chunk_size=cfg["multiscale_chunk_size"],
             voxel_size=vsz,
             n_lvls=cfg["n_lvls"],
             scale_factor=cfg["scale_factor"],
-            target_block_size_mb=cfg["target_block_size_mb"],
             base_level=cfg["base_level"],
-        )
-        try:
-            takes_version = "output_zarr_version" in inspect.signature(MultiScale).parameters
-        except (TypeError, ValueError):
-            takes_version = False
-        if takes_version:
-            ms_kwargs["output_zarr_version"] = cfg["output_zarr_version"]
-            print(f"MultiScale: output_zarr_version={cfg['output_zarr_version']}")
-        else:
-            print("MultiScale: this build takes no output_zarr_version; "
-                  "level-3 format is asserted after the run")
-        MultiScale(**ms_kwargs).run()
+            compressor_cname=cfg["compressor_cname"],
+            compressor_clevel=cfg["compressor_clevel"],
+            compressor_shuffle=cfg["compressor_shuffle"],
+        ).run()
 
         verify_level3(mask_out, ccf_fused=f"{in_base}/fusion/fused_ccf_ch.zarr")
         print("mask fusion + multiscale complete")

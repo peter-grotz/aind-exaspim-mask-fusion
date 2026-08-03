@@ -1,25 +1,27 @@
-# Rhapso mask fusion parameters. The output is fused onto the CCF-channel grid
+# Rhapso 0.4.5 mask fusion parameters. The output is fused onto the CCF-channel grid
 # (fused_ccf_ch) so registration can multiply the mask into the sample.
 
+# SHARED
+compressor_cname: "zstd"              # zstd, lz4, lz4hc, zlib, blosclz, snappy
+compressor_clevel: 6                  # 0-9
+compressor_shuffle: "bitshuffle"      # noshuffle, shuffle, bitshuffle
+
 # AFFINE FUSION
-block_size: [256, 256, 256]           # xyz, per-task output block. MUST stay >= the level-0
-                                      # output chunk [z128,y256,x256] and chunk-aligned: with
-                                      # a smaller block (e.g. 128 in x/y) several tasks
-                                      # read-modify-write the SAME S3 chunk concurrently, and
-                                      # last-writer-wins silently clobbers the others -> zero
-                                      # blocks (holes) with no task error. 256 => one block per
-                                      # chunk in x/y, exactly two whole z-chunks -> no sharing.
+block_size: [256, 256, 256]           # xyz, per-task output block. MUST stay >= the output
+                                      # chunk below and chunk-aligned: with a smaller block
+                                      # several tasks read-modify-write the SAME S3 chunk
+                                      # concurrently, and last-writer-wins silently clobbers
+                                      # the others -> zero blocks (holes) with no task error.
+                                      # 256 => one block per chunk in x/y, two whole z-chunks.
+output_block_size: [256, 256, 128]    # xyz output chunk. 0.4.1 hardcoded (1,1,128,256,256);
+                                      # this reproduces it, so the on-disk chunking is unchanged.
 intensity_range: [0, 65535]           # uint16 output range
-block_scale: [1, 1, 1]                # xyz, blocks per Ray task -- [1,1,1] = one block/task
-                                      # (raise only with ample RAM/vCPU headroom per worker)
-overlap_strategy: "lowest_view_wins"  # crisp binary mask (no fractional blended edges).
-                                      # NOT max_blend: Rhapso 0.4.1 rejects it
-                                      # ("Unknown fusion_type"), it landed after that release.
+overlap_strategy: "max_blend"         # union in overlaps, still crisp on a binary mask.
+                                      # Needs >=0.4.2; 0.4.1 rejects it.
 output_zarr_version: 2                # registration reads Zarr v2
 
 # MULTISCALE  (level 3 = 8x downsample = the level registration reads)
 multiscale_chunk_size: [128, 128, 128]
 n_lvls: 8
 scale_factor: [[2, 2, 2], [2, 2, 2], [2, 2, 2], [2, 2, 2], [2, 2, 2], [2, 2, 2], [2, 2, 2]]  # zyx
-target_block_size_mb: 256
 base_level: 0

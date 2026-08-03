@@ -20,6 +20,15 @@ def _now():
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _rhapso_version():
+    """The installed Rhapso version, so the record cannot drift from the environment."""
+    try:
+        from importlib.metadata import version
+        return version("Rhapso")
+    except Exception:
+        return os.environ.get("RHAPSO_VERSION", "unknown")
+
+
 def emit(start=None, status="SUCCESS", input_xml=None, config=None):
     start = start or _now()
     end = _now()
@@ -27,7 +36,7 @@ def emit(start=None, status="SUCCESS", input_xml=None, config=None):
 
     parameters = {
         "engine": "Rhapso",
-        "rhapso_version": os.environ.get("RHAPSO_VERSION", "0.4.1"),
+        "rhapso_version": _rhapso_version(),
         # Taken from the run's resolved path and its actual config, not restated here --
         # a hardcoded overlap_strategy previously reported lowest_view_wins while the
         # config said max_blend, hiding the setting that was failing every fusion task.
